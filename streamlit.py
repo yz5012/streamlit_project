@@ -9,14 +9,6 @@ import streamlit.components.v1 as components
 import tempfile
 import os
 
-# === Load Data from Cleaned_data.csv ===
-@st.cache_data
-def load_data():
-    df = pd.read_csv("Cleaned_data.csv", parse_dates=['Created_date'])
-    return df
-
-df = load_data()
-
 # === Neo4j Setup ===
 database_name = "neo4j"
 username = "neo4j"
@@ -27,6 +19,32 @@ driver = GraphDatabase.driver(uri, auth=(username, password))
 session = driver.session()
 
 st.success("✅ Successfully connected to Neo4j!")
+
+# === Function to load data from Neo4j instead of CSV ===
+@st.cache_data
+def load_data_from_neo4j():
+    query = """
+    MATCH (z:Zip)-[r:HAS_COMPLAINT]->(c:ComplaintType)
+    OPTIONAL MATCH (z)-[:LOCATED_IN]->(b:Borough)
+    RETURN z.code AS Incident_zip,
+           c.type AS Complaint_type,
+           b.name AS Borough,
+           r.count AS count
+    """
+    with session.begin_transaction() as tx:
+        result = tx.run(query)
+        records = result.data()
+    df = pd.DataFrame(records)
+    
+    # Fill missing Boroughs if any
+    df['Borough'] = df['Borough'].fillna('UNKNOWN')
+    
+    # Create dummy Created_date for testing trend if needed
+    df['Created_date'] = pd.date_range(start='2023-01-01', periods=len(df), freq='D')
+
+    return df
+
+df = load_data_from_neo4j()
 
 # === Function to get network graph data ===
 def get_zip_graph_data(selected_zip):
@@ -40,7 +58,7 @@ def get_zip_graph_data(selected_zip):
         return [(record["zip"], record["complaint"], record["count"]) for record in result]
 
 # === Streamlit Layout ===
-st.title("📍 NYC Neighborhood Complaint Index (NCI)")
+st.title("📍 NYC Neighborhood Complaint Index (NCI) (Neo4j Live)")
 
 # Sidebar filter
 with st.sidebar:
@@ -125,6 +143,27 @@ st.download_button(
     file_name=f"complaints_{selected_zip}.csv",
     mime="text/csv"
 )
+
+# === Neo4j Network Graph ===
+st.subheader("🌐 Complaint Network Graph (Neo4j)")
+
+graph_data = get_zip_graph_data(selected_zip)
+
+if graph_data:
+    g = Network(height="400px", width="100%", notebook=False)
+    g.add_node(selected_zip, label=f"ZIP: {selected_zip}", color="blue")
+    for zip_code, complaint_type, count in graph_data:
+        g.add_node(complaint_type, label=complaint_type, color="orange")
+        g.add_edge(zip_code, complaint_type, value=count, title=f"{count} complaints")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
+        g.show(tmp_file.name)
+        HtmlFile = open(tmp_file.name, 'r', encoding='utf-8')
+        components.html(HtmlFile.read(), height=450)
+        HtmlFile.close()
+        os.remove(tmp_file.name)
+else:
+    st.warning("⚠️ No graph data available for this ZIP code in Neo4j.")
 
 # === Safe Neo4j Closing ===
 session.close()
